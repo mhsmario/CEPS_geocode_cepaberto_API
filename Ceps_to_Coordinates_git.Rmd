@@ -1,0 +1,222 @@
+---
+title: "CEPs_to_Coordinates"
+author: "Mario Saraiva"
+date: "4/23/2020"
+output:
+   html_document:
+    theme: simplex
+    toc: true
+    number_sections: false
+---
+
+####CEP to Coordinates via CEPABERTO.COM
+
+**Objetivo**: R Script para capturar as coordenadas geograficas de uma lista de CEPs do Distrito Federal e do estado do Goias usando a API do Projeto CEP-ABERTO - https://cepaberto.com/ .
+
+####Libraries
+
+Para rodar o script todo, é importante que as seguintes pacotes (libraries) são necessárias. Para instalar algum pacote use a função install.packages("nome do pacote")
+```{r Libraries, message=FALSE, warning=FALSE}
+library(jsonlite)
+
+#Require the package so you can use it
+require("httr")
+require("jsonlite")
+
+ # General-purpose data wrangling
+    library(tidyverse)  
+    library(tidyr)
+    # Parsing of HTML/XML files  
+    library(rvest)    
+
+    # String manipulation
+    library(stringr)   
+
+    # Verbose regular expressions
+    library(rebus)     
+
+    # Eases DateTime manipulation
+    library(lubridate)
+
+library(splitstackshape)
+
+library(progress)
+
+library(xlsx)
+
+library(tools)
+
+library(dplyr)
+```
+
+####Functions
+
+Uma função para medir o CPU usage do loop.
+```{r Function to capture CPU usage}
+testit <- function(x)
+{
+    p1 <- proc.time()
+    Sys.sleep(x)
+    proc.time() - p1 # The cpu usage should be negligible
+}
+```
+
+####API setup
+
+A função básica para puxar dados da API do CEPs Abertos.com precisamos usar a função GET() no seguinte formato:
+
+call1 = "URL DO API CEPS ABERTOS", i.e. "http://www.cepaberto.com/api/v3/cep?cep=70165-900" (CEP do Congresso Nacional)
+
+GET(url = call1, add_headers(Authorization = paste("Token token=[SENHA DE 52 DIGITOS]")))
+
+*Token*: O Token do API é individual e se encontra no meio da pagina https://cepaberto.com/api_key .
+
+###API Basic model
+
+O codigo abaixo é apenas um exemplo de como se deve fazer o call. Primeiro "entramos na pagina" (acessamos a API) e copiamos as informações e salvamos no get_cep_info. Depois convertemos as informações para texto usando a função " content(get_cep_info, "text"). Logo, limpamos todos markups de JSON e salvmos só as informações importantes como um Data Frame.
+
+O modelo abaixo é suficiente para quem deseja acessar 1 CEP ou poucos CEPs. Nas seções seguintes mostro como construir um loop para capturar as coordenadas para vários ceps.
+
+```{r eval=FALSE, include=TRUE}
+call.api <- "http://www.cepaberto.com/api/v3/cep?cep=70165-900"
+
+get_cep_info <- GET(url = call.api, add_headers(Authorization = paste("Token token=XXXXXXXXXXXXXXXXXXXXXXX")))
+
+get_cep_info_text <- content(get_cep_info, "text")
+get_cep_info_text
+
+get_cep_info_jason <- fromJSON(get_cep_info_text, flatten = TRUE)
+
+gdf <- as.data.frame(get_cep_info_jason)
+```
+
+####Load Transport data with relevant CEPs.
+
+Carregamos a base de dados com os ceps que precisam das coordenadas geograficas.
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE, paged.print=FALSE}
+COVID19_Master...Transporte_19Abr2020 <- read.csv("~/Documents/IIR - NG/COVID19/COVID19_Master - Transporte_19Abr2020.csv")
+
+CEPs_Transporte <- as.data.frame(as.character(COVID19_Master...Transporte_19Abr2020$CEP))
+```
+
+####Prepare data
+
+Best-practices: É sempre bom trabalhar com uma base completa. Então limpamos as linhas que faltam dados/ceps. É importante prestar atenção ao formato do call de CEPs, pois ele não usa o hifen apenas números. Logo, precisamos limpar os ceps e remover o "-".
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE, paged.print=FALSE}
+CEPs_Transporte <- as.data.frame(as.character(COVID19_Master...Transporte_19Abr2020$CEP))
+
+colnames(CEPs_Transporte)[1] <- "CEP"
+CEPs_Transporte$CEP <- gsub("-", "", CEPs_Transporte$CEP)
+
+CEPs_Transporte <- CEPs_Transporte %>%
+  # recode empty strings "" by NAs
+  na_if("") %>%
+  # remove NAs
+  na.omit %>%
+  filter(CEP != "#N/A")
+```
+
+####Loop to get Coordinates from CEPs
+
+O loop para buscar as coordenadas de todos os CEPs é relativamente simples. Para cada linha (i) no Data Frame CEPs_Transporte na coluna ($) CEP, cole o cep e forme o URL do pedido. Depois siga o modelo básico para buscar as informações desejadas.
+
+É importante notar que para alguns CEPs tem um número diferente de colunas, o que é um problema na hora de agregar os resultados. Por isso é preciso criar tres data frames vazios para cada número de colunas. Na minha experiencia só encontrei 3 tipos - com 9,10, e 11 colunas. Para o Loop funcionar direitinho, colocamos algumas condições de acordo com o número de colunas para que cada resultado seja agregado de acordo com o seu tipo.
+
+A parte final do loop é apenas para display o progresso do loop, com a porcentagem de CEPs que já foram processados. E de acordo com o Projeto Cep Aberto, por medidas de segurança é preciso 1 segundo entre um pedido e outro. 
+
+***
+
+No meu caso, para capturar informações para 5000 Ceps me levou um pouco menos de 3horas (2.87 horas):   
+* user: 173.15
+* system: 46.90
+* *elapsed: 10337.57*
+
+```{r Loop, eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+###Limit 10.000 per day!
+token <- "[ADD O SEU TOKEN]"
+
+Coordinates.09 <- data.frame()
+Coordinates.10 <- data.frame()
+Coordinates.11 <- data.frame()
+save.ite <- data.frame()
+
+ptm <- proc.time()
+
+for (i in CEPs_Transporte$CEP) {
+  start <- Sys.time()
+  
+  call <- paste("http://www.cepaberto.com/api/v3/cep?cep=",i, sep = "")
+  
+  get_cep_info <- GET(url = call, add_headers(Authorization = paste("Token token=", token, sep = "")))
+  
+  get_cep_info_text <- content(get_cep_info, "text")
+  
+  get_cep_info_jason <- fromJSON(get_cep_info_text, flatten = TRUE)
+  
+  gdf <- as.data.frame(get_cep_info_jason)
+  
+  if (ncol(gdf) == 9) {
+  
+  Coordinates.09 <- rbind(Coordinates.09,gdf)
+  } 
+  if (ncol(gdf) == 10) {
+    Coordinates.10 <- rbind(Coordinates.10,gdf)
+  }
+  
+  if (ncol(gdf) == 11) {
+    Coordinates.11 <- rbind(Coordinates.11,gdf)
+  }
+  
+   ##Data about the loop
+   end <- Sys.time() 
+   
+   ite <- (end - start)
+   
+   save.ite <- rbind(save.ite,ite)
+   
+   progress <- which(grepl(i, CEPs_Transporte$CEP))/nrow(CEPs_Transporte)*100
+   
+   print(paste("Time per iteration: ", ite," - id = ",i, sep = ""))
+   
+   print(paste("CEPs checked = ", progress[1],"%", sep = ""))
+   
+   print('Sleeping for 1.2 seconds')
+   Sys.sleep(1.2)
+}
+
+loop.processing.time <- proc.time() - ptm
+
+```
+
+####Merge results
+
+Por último, precisamos agregar todos os resultados juntos, mas para isso é preciso que todas as data frames tenham o mesmo número de colunas. Depois usamos a função "merge" para juntar tudo usando o CEP como chave.
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE, paged.print=FALSE}
+Coordinates.09$bairro <- "bairro.missing"
+Coordinates.09$complemento <- "complemento.missing"
+Coordinates.09 <- Coordinates.09[,c(1,2,3,4,5,10,11,6,7,8,9)]
+
+Coordinates.10$complemento <- "complemento.missing"
+Coordinates.10 <- Coordinates.10[,c(1,2,3,4,5,6,11,7,8,9,10)]
+
+Coordinates <- rbind(Coordinates.09,Coordinates.10,Coordinates.11)
+
+Covid19$CEP <- gsub("-", "", Covid19$CEP)
+colnames(Coordinates)[2] <- "CEP"
+
+CEPs_Transporte2 <- merge(Covid19,Coordinates, by = "CEP")
+```
+
+
+####Resultados
+
+|     |altitude |cep      |latitude    |longitude   |logradouro              |bairro                   |complemento | cidade.ddd|cidade.ibge |cidade.nome |sigla |
+|:----|:--------|:--------|:-----------|:-----------|:-----------------------|:------------------------|:-----------|----------:|:-----------|:-----------|:-----|
+|4962 |983.8    |73754636 |-15.6216249 |-47.6521514 |Quadra SQ 57 Conjunto B |Brasilinha 16 (Panorama) |Comércio    |         61|5217609     |Planaltina  |GO    |
+|4963 |983.8    |73754637 |-15.6216249 |-47.6521514 |Quadra SQ 57 Conjunto C |Brasilinha 16 (Panorama) |Comércio    |         61|5217609     |Planaltina  |GO    |
+|4964 |983.8    |73754655 |-15.6216249 |-47.6521514 |Quadra SQ 58 Conjunto A |Brasilinha 16 (Panorama) |Comércio    |         61|5217609     |Planaltina  |GO    |
+|4965 |983.8    |73754656 |-15.6216249 |-47.6521514 |Quadra SQ 58 Conjunto B |Brasilinha 16 (Panorama) |Comércio    |         61|5217609     |Planaltina  |GO    |
+|4966 |983.8    |73754657 |-15.6216249 |-47.6521514 |Quadra SQ 58 Conjunto C |Brasilinha 16 (Panorama) |Comércio    |         61|5217609     |Planaltina  |GO    |
